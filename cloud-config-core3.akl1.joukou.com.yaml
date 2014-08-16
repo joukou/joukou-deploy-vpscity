@@ -1,0 +1,328 @@
+#cloud-config
+
+hostname: core3
+coreos:
+  fleet:
+    public-ip: 103.18.59.163:4001
+    metadata: provider=vpscity
+  update:
+    group: c38b37b9-addd-4bb8-bcd6-4c4dbb1d2853
+    server: https://joukou.update.core-os.net/v1/update/
+    reboot-strategy: best-effort
+  units:
+  # https://github.com/coreos/coreos-cloudinit/issues/156
+  - name: systemd-sysctl.service
+    command: restart
+  # https://github.com/coreos/coreos-cloudinit/issues/232
+  - name: etcd.service
+    command: start
+    enable: true
+    content: |
+      [Unit]
+      Description=etcd
+      Requires=network-online.target
+      After=network-online.target
+
+      [Service]
+      User=etcd
+      PermissionsStartOnly=true
+      Environment="ETCD_NAME=core3"
+      Environment="ETCD_ADDR=103.18.59.163:4001"
+      Environment="ETCD_PEER_ADDR=103.18.59.163:7001"
+      Environment="ETCD_PEERS=103.18.59.164:7001,103.18.59.183:7001"
+      Environment="ETCD_DATA_DIR=/var/lib/etcd"
+      Environment="ETCD_MAX_RETRY_ATTEMPTS=30"
+      ExecStart=/usr/bin/etcd 
+      Restart=always
+      RestartSec=10s
+
+      [Install]
+      WantedBy=multi-user.target
+  - name: fleet.service
+    command: start
+  - name: fleet-tcp.socket
+    command: start
+    enable: true
+    content: |
+      [Unit]
+      Description=Fleet Socket for the API
+
+      [Socket]
+      ListenStream=4002
+      Service=fleet.service
+      BindIPv6Only=both
+
+      [Install]
+      WantedBy=sockets.target
+  - name: flannel-install.service
+    command: start
+    enable: true
+    content: |
+      [Unit]
+      Description=Install Flannel
+      Requires=network-online.target
+      After=network-online.target
+
+      [Service]
+      Type=oneshot
+      RemainAfterExit=yes
+      ExecStartPre=/opt/bin/wait-for-network
+      ExecStart=/opt/bin/install-flannel
+
+      [Install]
+      WantedBy=multi-user.target
+  - name: flannel.service
+    command: start
+    enable: true
+    content: |
+      [Unit]
+      Description=Flannel
+      Requires=etcd.service flannel-install.service
+      After=etcd.service flannel-install.service
+
+      [Service]
+      User=root
+      ExecStartPre=/opt/bin/wait-for-etcd
+      ExecStartPre=-/usr/bin/etcdctl --no-sync mk /coreos.com/network/config '{"Network":"10.0.0.0/16"}'
+      ExecStartPre=/usr/sbin/iptables -N FLANNEL
+      ExecStart=/opt/bin/flanneld -ip-masq=true
+      ExecStartPost=/opt/bin/wait-for-file /run/flannel/subnet.env
+
+      [Install]
+      WantedBy=multi-user.target
+  - name: docker-env.service
+    command: start
+    enable: true
+    content: |
+      [Unit]
+      Description=Docker Application Container Engine Environment
+      Documentation=http://docs.docker.io
+      Requires=flannel.service
+      After=flannel.service
+
+      [Service]
+      EnvironmentFile=/run/flannel/subnet.env
+      ExecStart=/opt/bin/docker-env
+      Type=oneshot
+      RemainAfterExit=yes
+
+      [Install]
+      WantedBy=multi-user.target
+  - name: docker.service
+    command: start
+    enable: true
+    content: |
+      [Unit]
+      Description=Docker Application Container Engine
+      Documentation=http://docs.docker.io
+      Requires=docker.socket
+      Requires=docker-env.service
+      After=docker-env.service
+
+      [Service]
+      Environment="TMPDIR=/var/tmp/"
+      EnvironmentFile=/run/flannel/subnet.env
+      EnvironmentFile=/run/docker.env
+      ExecStartPre=/bin/mount --make-rprivate /
+      LimitNOFILE=1048576
+      LimitNPROC=1048576
+      # Run docker but don't have docker automatically restart
+      # containers. This is a job for systemd and unit files.
+      ExecStart=/usr/bin/docker --daemon --bip=${FLANNEL_SUBNET} --dns=${DOCKER_BRIDGE_IPV4} --mtu=${FLANNEL_MTU} --storage-driver=btrfs --host=fd://
+
+      [Install]
+      WantedBy=multi-user.target
+  - name: docker-tcp.socket
+    command: start
+    enable: true
+    content: |
+      [Unit]
+      Description=Docker Socket for the API
+
+      [Socket]
+      ListenStream=2375
+      Service=docker.service
+      BindIPv6Only=both
+
+      [Install]
+      WantedBy=sockets.target
+  - name: settimezone.service
+    command: start
+    enable: true
+    content: |
+      [Unit]
+      Description=Set the timezone
+
+      [Service]
+      ExecStart=/usr/bin/timedatectl set-timezone Pacific/Auckland
+      RemainAfterExit=yes
+      Type=oneshot
+
+      [Install]
+      WantedBy=multi-user.target
+users:
+- name: isaac
+  groups:
+    - sudo
+    - docker
+  ssh-authorized-keys:
+    - ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAACAQC9x7BHoE7F/eIAS77QGWjs3aC5nV9DX2L+WfOrZ5mF1KFMYzwZqklZzbLGgq6fjm+wHcuqr42JMxD0ul//shfauJmQV12LUp3Et6hNABOiuhlmIXD5XsutZSOcgVOEpSCnPsMgHhThDtNaSpOMAE2os4BBlXGEqmK7y7g5qGSN6L1HSoZhNaeS98I9n1zITrrVICDXg7dtotOjoUh0ddHAN8a+YLAXU0NSiSWkAUCsfhSLjGIAa0S8jabtYvLuxkUgV2YwNnVmkfLK+T9bMSw6MCVoksNBNWcuETpmruHip8URZK9KdAUvLW7EISqyO9Irfq80vY5FsYNeqhns+hTiXV1j50VGSXAM/TfZc4/QjG2OOujpBPSTLaqxDENAF2X4t24A+1nLhpf7Ry+6sK83WbonGT4gxxO0FyU0nqjtCnIQsNpTd3qIjTjW5nHlgUQmrmFZiIHQL5E+/kkv7Z9melCVaGD7O0fEmokQe0OO/aSe3l2+OTz77LM1wOC2dzzUv8ya0rXvhyv1eJpTPltxESvjQ9HmIuc0gevQi7nDC58UZuEC9FtIZnRSWO6sTS9/0wvbewZtoOAXxz3m+4os4/YX+pYjCoT/QOsSfh8s647jR/qDNM+Hzfc+YiCAzxlAfXlbbnCKy9HA22TtwMcdlXG9Wbiu40/m3RjYVS8DRQ== isaac@marvin.local
+- name: ben
+  groups:
+    - sudo
+    - docker
+  ssh-authorized-keys:
+    - ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAACAQC1KMarAPst6vBCWXTEywtHVhy0tdYEwA6fJJGphwMOGINSwof3bO7HSa5FhfRks6hQI8nIsIXAdlLU44ZwRi6JJEkfPe+6IK4p4pouhI5lLlX988aDA0yDh7NvHN8mSzvbtn60zZYXgLSl9wBOag/sEIcfrWxDQ0/nJHG3anREUIu3wu9Z6VDuyYqvow3H0Xi9U+WmxEKt/vTjnYfSmctIsw9xEyhrgIPK2FESW5E8djzetYxVpoZ8hU5kSb1rQgHlgli+YRmHKWGEF+v7mPwax6BuD3HjNIhLuNA8hdA7hO8YSNNP+zeSWcCT/+LG5Ju6bW4VbNocvk1K7ddN0pkd/nD9KRF+kGltc5s+1X/O5cgY8meo+7/G/Kckkl72Dzrwc2VBr/OeH8ykySlQNQxE7shS6SoiPdql3ETb4TRLBrgggxYYiKNtjzhwWLTn+XNOUuYKSiPnqugjkGlu2mtHM3CigQLqol4h8orrkQpuUe7ZKh2iI0aGBNooak/oRHD5EReu5nzaRBBimzl03aCMv0SBrSVUSP6swB8PbYx1Wv+wOjcapk2rEbDGb4d9dJ33TT4IYL8dmCjtOBbwTNOLySDSrTFBRvDgMnqBUAcSlmm1B6c7kepz5fynIB1bu0TBHu3EVHXoQze7dbhiWK77W4/KRww+u9ScjxGSFJXjfw== Hyperion
+- name: fabian
+  groups:
+    - docker
+  ssh-authorized-keys:
+    - ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQC8yS55o9WDfQRrNwCNpKausvLBhRrVwNox2RlPX+z3NzaWeip3vMpn+tYUppnGbE3ir6/0fKJsD0C7u8v9p5dkP6zzMaldBGcAv46RhtJeZJXmjg7M7BLeTMGIp36GB1qskLRKsCEof2xCXKwWbPFSX6vQL+KmfaItZnnwkPrMZzddTIv6Au28XWvln9+VqM8nPKTH88nqjTWveKbyh+7lLiOC1VG1iAgX9yehAERfRpLxWZRegHzdZ2nsejo5p/GPhm16wl125mnfRpgWQBoClznyliUWl74SmESy9ab5o+DK6a6432BoVs1xV8oqcT8rwAO8KSSlEUOdM/ELX9xr fabian.cook@joukou.co
+- name: rowan
+  groups:
+    - docker
+  ssh-authorized-keys:
+    - ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQC8/FKAl7O0WSYWNCZA9vGswOtkakl9bs2R3NZn7AKcKElXCXCU27b3XKGPahzL+wnAr+RJD9Amha9YiEY6AlZmJC15/j9b3RYgisQTNErZOabe0sct7TK5AES6N/80PLNyN09fpKdQ6kk/I/k37WhBrjCKEys909YbT+RU83oJoKISrQlNtYD2KoNnIOZ/ubHxd08AWiOvZhkExuCtRKwBo6HrvmIKV8ACrXYX68AdsxhQZE7Rd+j5PS6tnEa5rzThvorWz3OTzCmAaOEXlZien2m7i8oxDq3R21bpCX+otsjcHDzKwivvICEZTZKwmZTf454UKBk95uRNXROI2oHx rowan.crawford@joukou.co
+- name: juan
+  groups:
+    - docker
+  ssh-authorized-keys:
+    - ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAACAQDC+pLh+CIOlTlzEkHtxxn0pniq4cOz5eNnOaiEK5lQy2Z6ebzbIDJD5c2WhMBFeAifhGmtRO0Uo5fdOieLrKmBMjKI/y5GeFnwJmZXTJzmoUjxbUPkJ/WZwZ+G8WSeZD3NCatqG31stan8JQsGKqBTjjuOjMwqpYDrAEeaV/FiBIHA+is0zH7ARfAFyRMoPc3keJ1pSb1QHIKFRgjax2TS6bMFqAxgQSWUBLC8Q3yNBiMqGnCydXeFhts3E9VZWtVIX1NjpJom7jsYz52IUyvzYGNjK1iaJvfn6Pc0i/Ne8/s6Js+sx5uVnhdQcLkdRiLegtAuWBT/h5D0SUSCpnfCh0VN8fPfSu64lkm9Vvrr/temIxKDyYnDV8dQNtgt5r//SW4ptx5hzTjqSkWxeVsylpceVCYOgkONpzLYi4YG5cWoSjfnPeneqKUW4j4kdeHli3C4WJXxWzmiaix+ZNa0KFPw7vO/aq1krDNdHYKtsso9a1aDq3i38UKxD1hrHZ16Bwu0bIQe+oqxA+vhN4YfWdMC7cA/qQmtmv8//4+ZlPGE1E/GMiu5lk7Gi6B2k+Am37WSQVqPBqY2tvNhqNb+EeA9VziII/zuaAcMRz2gjsYBy5MTmlQQH8/uTXOdtkLIvgP9uMsrOYJbqZV0TtLTlrZCVaG2oUZvaGq5LwWgWw== juan@juans-mbp.station
+ssh_authorized_keys:
+# Isaac Johnston
+- ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAACAQC9x7BHoE7F/eIAS77QGWjs3aC5nV9DX2L+WfOrZ5mF1KFMYzwZqklZzbLGgq6fjm+wHcuqr42JMxD0ul//shfauJmQV12LUp3Et6hNABOiuhlmIXD5XsutZSOcgVOEpSCnPsMgHhThDtNaSpOMAE2os4BBlXGEqmK7y7g5qGSN6L1HSoZhNaeS98I9n1zITrrVICDXg7dtotOjoUh0ddHAN8a+YLAXU0NSiSWkAUCsfhSLjGIAa0S8jabtYvLuxkUgV2YwNnVmkfLK+T9bMSw6MCVoksNBNWcuETpmruHip8URZK9KdAUvLW7EISqyO9Irfq80vY5FsYNeqhns+hTiXV1j50VGSXAM/TfZc4/QjG2OOujpBPSTLaqxDENAF2X4t24A+1nLhpf7Ry+6sK83WbonGT4gxxO0FyU0nqjtCnIQsNpTd3qIjTjW5nHlgUQmrmFZiIHQL5E+/kkv7Z9melCVaGD7O0fEmokQe0OO/aSe3l2+OTz77LM1wOC2dzzUv8ya0rXvhyv1eJpTPltxESvjQ9HmIuc0gevQi7nDC58UZuEC9FtIZnRSWO6sTS9/0wvbewZtoOAXxz3m+4os4/YX+pYjCoT/QOsSfh8s647jR/qDNM+Hzfc+YiCAzxlAfXlbbnCKy9HA22TtwMcdlXG9Wbiu40/m3RjYVS8DRQ== isaac@marvin.local
+write_files:
+- path: /home/core/.dockercfg
+  owner: core:core
+  permissions: '0444'
+  content: |
+    {
+      "https://quay.io/v1/": {
+        "auth": "am91a291K2NvcmVvczoyR01GVVFaTzFLVFgyNDdQUkJMMDRVS05MNk1PRExSVDI2UTVPNjZNWUlXTjRWMUIwSjBCRFdPMkVKWFRYMllU",
+        "email": ""
+      }
+    }
+- path: /root/.dockercfg
+  owner: root:root
+  permissions: '0444'
+  content: |
+    {
+      "https://quay.io/v1/": {
+        "auth": "am91a291K2NvcmVvczoyR01GVVFaTzFLVFgyNDdQUkJMMDRVS05MNk1PRExSVDI2UTVPNjZNWUlXTjRWMUIwSjBCRFdPMkVKWFRYMllU",
+        "email": ""
+      }
+    }
+- path: /etc/hosts
+  owner: root:root
+  permissions: 0644
+  content: |
+    127.0.0.1       localhost localhost.localdomain
+    ::1             localhost localhost.localdomain
+    103.18.59.162   core1.akl1.joukou.com core1
+    103.18.59.164   core2.akl1.joukou.com core2
+    103.18.59.163   core3.akl1.joukou.com core3
+    103.18.59.183   core4.akl1.joukou.com core4
+# Basho Riak minimally sufficient network settings to improve many aspects of
+# Riak usage on Linux.
+# See: http://docs.basho.com/riak/2.0.0/ops/tuning/linux/#Kernel-and-Network-Tuning
+- path: /etc/sysctl.d/10-net.conf
+  owner: root:root
+  permissions: '0644'
+  content: |
+    net.ipv4.tcp_max_syn_backlog = 40000
+    net.core.somaxconn = 40000
+    net.ipv4.tcp_sack = 1
+    net.ipv4.tcp_window_scaling = 1
+    net.ipv4.tcp_fin_timeout = 15
+    net.ipv4.tcp_keepalive_intvl = 30
+    net.ipv4.tcp_tw_reuse = 1
+    net.ipv4.tcp_moderate_rcvbuf = 1
+# vm.max_map_count
+# The maximum number of memory map areas a process may have. Memory map areas
+# are used as a side-effect of calling malloc, directly by mmap and mprotect,
+# and also when loading shared libraries.
+#
+# ElasticSearch uses a hybrid mmapfs / niofs directory by default to store its
+# indices. The default limits on mmap counts is too low, which may result in
+# out of memory exceptions.
+# See: http://www.elasticsearch.org/guide/en/elasticsearch/reference/current/setup-configuration.html#vm-max-map-count
+- path: /etc/sysctl.d/10-vm.conf
+  owner: root:root
+  permissions: '0644'
+  content: |
+    vm.max_map_count = 262144
+- path: /etc/environment
+  owner: root:root
+  permissions: '0444'
+  content: |
+    COREOS_PRIVATE_IPV4=103.18.59.163
+    COREOS_PUBLIC_IPV4=103.18.59.163
+- path: /etc/skydns.env
+  owner: root:root
+  permissions: '0444'
+  content: |
+    SKYDNS_DOMAIN=joukou.local
+    SKYDNS_DOMAIN_PATH=local/joukou
+    SKYDNS_ZONE=akl1
+    SKYDNS_ENVIRONMENT=production
+- path: /opt/bin/wait-for-network
+  owner: root:root
+  permissions: '0555'
+  content: |
+    #!/bin/bash
+    while true
+    do
+      ping -c 1 google.com
+      if [[ $? == 0 ]];
+      then
+        echo 'network is available.'
+        break;
+      else
+        echo 'network is not available. waiting...'
+        sleep 1
+      fi
+    done
+- path: /opt/bin/wait-for-etcd
+  owner: root:root
+  permissions: '0555'
+  content: |
+    #!/bin/bash
+    until etcdctl --no-sync ls >/dev/null 2>&1; do
+      echo "waiting for etcd..."
+      sleep 5
+    done
+- path: /opt/bin/wait-for-file
+  owner: root:root
+  permissions: '0555'
+  content: |
+    #!/bin/bash
+    while true
+    do
+      if [[ -e $1 ]]
+      then
+        break;
+      else
+        echo "${1} does not exist. waiting..."
+        sleep 1
+      fi
+    done
+- path: /opt/bin/install-flannel
+  owner: root:root
+  permissions: '0555'
+  content: |
+    #!/bin/bash
+    if [[ ! -e /opt/bin/flanneld ]]
+    then
+      echo 'flannel is not installed. installing...'
+      cd /opt/bin
+      wget https://github.com/joukou/joukou-docker-flannel-build/releases/download/git%2B9c63c4e/flanneld
+      chmod +x flanneld
+    else
+      echo 'flannel is already installed.'
+    fi
+- path: /opt/bin/docker-env
+  owner: root:root
+  permissions: '0555'
+  content: |
+    #!/bin/bash
+    printf "DOCKER_BRIDGE_IPV4=$(printf ${FLANNEL_SUBNET} | awk -F '/' '{ print $1}')" > /run/docker.env

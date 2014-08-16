@@ -1,0 +1,26 @@
+{
+  "name": "joukou-deploy-vpscity",
+  "version": "0.0.0",
+  "description": "CoreOS Cloud Configs for deployment of the Joukou Platform to VpsCity.",
+  "main": "index.js",
+  "scripts": {
+    "test": "for f in *.yml; do js-yaml -t $f; done"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git://github.com/joukou/joukou-deploy-vpscity.git"
+  },
+  "keywords": [
+    "coreos",
+    "cloudinit"
+  ],
+  "author": "Isaac Johnston <isaac.johnston@joukou.com> (https://joukou.com/)",
+  "license": "Apache-2.0",
+  "bugs": {
+    "url": "https://github.com/joukou/joukou-deploy-vpscity/issues"
+  },
+  "homepage": "https://github.com/joukou/joukou-deploy-vpscity",
+  "devDependencies": {
+    "js-yaml": "3.2.1"
+  }
+}
